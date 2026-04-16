@@ -130,6 +130,7 @@ jobs:
         with:
           ndk-version: r25c
 
+
       - name: Build proot (Android NDK, pure static)
         run: |
           set -euxo pipefail
@@ -150,9 +151,8 @@ jobs:
           cd src
           make clean
 
-          # 注意这里的魔法：
-          # 1. 加上 -D__ANDROID__ 激活 Termux 的专有补丁
-          # 2. 加上 -static 让它彻底摆脱对 Android 系统库版本的依赖，走到哪里都能跑
+          # 注意看这里！
+          # 我们把缺失的 ASHMEM_NAME_LEN=256 和 ASHMEM_SET_NAME=0x40047701 强行注入给编译器！
           make \
             CC="$CC" \
             LD="$LD" \
@@ -161,9 +161,11 @@ jobs:
             OBJCOPY="$OBJCOPY" \
             OBJDUMP="$OBJDUMP" \
             HAS_LOADER_32BIT= \
-            CPPFLAGS='-D__ANDROID__ -D_FILE_OFFSET_BITS=64 -D_GNU_SOURCE -I. -I./ -I/tmp/libtalloc_check/talloc-install-aarch64/include' \
+            CPPFLAGS='-D__ANDROID__ -DASHMEM_NAME_LEN=256 -DASHMEM_SET_NAME=0x40047701 -Wno-deprecated-declarations -D_FILE_OFFSET_BITS=64 -D_GNU_SOURCE -I. -I./ -I/tmp/libtalloc_check/talloc-install-aarch64/include' \
             LDFLAGS='-static -L/tmp/libtalloc_check/talloc-install-aarch64/lib -Wl,-Bstatic -ltalloc' \
             -j"$(nproc)"
+
+        
 
       - name: Verify binary and linkage
         run: |
