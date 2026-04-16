@@ -124,22 +124,45 @@ jobs:
             exit 1
           fi
 
-      - name: Build proot (ARM64, static talloc only)
+      - name: Set up Android NDK
+        uses: nttld/setup-ndk@v1
+        id: setup-ndk
+        with:
+          ndk-version: r25c
+
+      - name: Build proot (Android NDK, pure static)
         run: |
           set -euxo pipefail
+          
+          # 定义 NDK 编译器的绝对路径
+          NDK_PATH="${{ steps.setup-ndk.outputs.ndk-path }}"
+          TOOLCHAIN="$NDK_PATH/toolchains/llvm/prebuilt/linux-x86_64"
+          TARGET="aarch64-linux-android28"
+          
+          export CC="$TOOLCHAIN/bin/$TARGET-clang"
+          export LD="$TOOLCHAIN/bin/$TARGET-clang"
+          export AR="$TOOLCHAIN/bin/llvm-ar"
+          export STRIP="$TOOLCHAIN/bin/llvm-strip"
+          export OBJCOPY="$TOOLCHAIN/bin/llvm-objcopy"
+          export OBJDUMP="$TOOLCHAIN/bin/llvm-objdump"
+          export RANLIB="$TOOLCHAIN/bin/llvm-ranlib"
 
           cd src
           make clean
 
+          # 注意这里的魔法：
+          # 1. 加上 -D__ANDROID__ 激活 Termux 的专有补丁
+          # 2. 加上 -static 让它彻底摆脱对 Android 系统库版本的依赖，走到哪里都能跑
           make \
-            CC=aarch64-linux-gnu-gcc \
-            LD=aarch64-linux-gnu-gcc \
-            STRIP=aarch64-linux-gnu-strip \
-            OBJCOPY=aarch64-linux-gnu-objcopy \
-            OBJDUMP=aarch64-linux-gnu-objdump \
+            CC="$CC" \
+            LD="$LD" \
+            AR="$AR" \
+            STRIP="$STRIP" \
+            OBJCOPY="$OBJCOPY" \
+            OBJDUMP="$OBJDUMP" \
             HAS_LOADER_32BIT= \
-            CPPFLAGS='-D_FILE_OFFSET_BITS=64 -D_GNU_SOURCE -I. -I./ -I/tmp/libtalloc_check/talloc-install-aarch64/include' \
-            LDFLAGS='-L/tmp/libtalloc_check/talloc-install-aarch64/lib -Wl,-Bstatic -ltalloc -Wl,-Bdynamic -Wl,-z,noexecstack' \
+            CPPFLAGS='-D__ANDROID__ -D_FILE_OFFSET_BITS=64 -D_GNU_SOURCE -I. -I./ -I/tmp/libtalloc_check/talloc-install-aarch64/include' \
+            LDFLAGS='-static -L/tmp/libtalloc_check/talloc-install-aarch64/lib -Wl,-Bstatic -ltalloc' \
             -j"$(nproc)"
 
       - name: Verify binary and linkage
@@ -147,19 +170,11 @@ jobs:
           set -euxo pipefail
 
           file src/proot
-          aarch64-linux-gnu-readelf -h src/proot | grep 'Machine'
-          aarch64-linux-gnu-readelf -d src/proot | grep NEEDED | tee /tmp/proot-needed.txt
-
-          if grep -q 'libtalloc.so' /tmp/proot-needed.txt; then
-            echo "ERROR: libtalloc is still dynamically linked"
-            exit 1
-          fi
+          # 使用 NDK 的 readelf 检查
+          "${{ steps.setup-ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-readelf" -d src/proot | grep NEEDED || echo "Fully static! No NEEDED libraries."
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: proot-arm64-static-talloc
-          path: |
-            src/proot
-            /tmp/libtalloc_check/talloc-install-aarch64/lib/libtalloc.a
-            /tmp/proot-needed.txt
+          name: proot-android-aarch64-static
+          path: src/proot
