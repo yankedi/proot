@@ -1,0 +1,153 @@
+---
+name: ARM64 Build With Static Talloc
+
+"on":
+  workflow_dispatch:
+  push:
+    paths:
+      - "src/**"
+      - ".github/workflows/mian.yml"
+
+jobs:
+  build-arm64-static-talloc:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            make \
+            wget \
+            xz-utils \
+            qemu-user \
+            gcc-aarch64-linux-gnu \
+            binutils-aarch64-linux-gnu
+
+      - name: Check dependency readiness
+        run: |
+          set -euxo pipefail
+
+          command -v make
+          command -v wget
+          command -v tar
+          command -v qemu-aarch64
+          command -v aarch64-linux-gnu-gcc
+          command -v aarch64-linux-gnu-ar
+          command -v aarch64-linux-gnu-ranlib
+          command -v aarch64-linux-gnu-objdump
+          command -v aarch64-linux-gnu-readelf
+          command -v file
+
+          aarch64-linux-gnu-gcc --version | head -1
+          qemu-aarch64 --version | head -1
+
+          test -d /usr/aarch64-linux-gnu
+
+      - name: Build ARM64 libtalloc and generate libtalloc.a
+        run: |
+          set -euxo pipefail
+
+          mkdir -p /tmp/libtalloc_check
+          cd /tmp/libtalloc_check
+
+          wget -q -O talloc-2.4.3.tar.gz https://www.samba.org/ftp/talloc/talloc-2.4.3.tar.gz
+          tar -xf talloc-2.4.3.tar.gz
+
+          cat > /tmp/libtalloc_check/talloc_cross_answers.txt <<'EOF'
+          Checking uname sysname type: "Linux"
+          Checking uname machine type: "aarch64"
+          Checking uname release type: "6.6"
+          Checking uname version type: "#1"
+          rpath library support: NO
+          -Wl,--version-script support: OK
+          Checking getconf LFS_CFLAGS: ""
+          Checking for large file support without additional flags: OK
+          Checking for -D_FILE_OFFSET_BITS=64: NO
+          Checking for -D_LARGE_FILES: NO
+          Checking getconf large file support flags work: OK
+          Checking correct behavior of strtoll: NO
+          Checking for working strptime: OK
+          Checking for C99 vsnprintf: "1"
+          Checking for HAVE_SHARED_MMAP: OK
+          Checking for HAVE_MREMAP: OK
+          Checking for HAVE_INCOHERENT_MMAP: NO
+          Checking for HAVE_SECURE_MKSTEMP: OK
+          EOF
+
+          cd /tmp/libtalloc_check/talloc-2.4.3
+
+          make distclean >/dev/null 2>&1 || true
+
+          CC=aarch64-linux-gnu-gcc AR=aarch64-linux-gnu-ar RANLIB=aarch64-linux-gnu-ranlib \
+          ./configure \
+            --disable-python \
+            --cross-compile \
+            --cross-answers=/tmp/libtalloc_check/talloc_cross_answers.txt \
+            --cross-execute='qemu-aarch64 -L /usr/aarch64-linux-gnu' \
+            --hostcc=gcc \
+            --prefix=/tmp/libtalloc_check/talloc-install-aarch64
+
+          make -j"$(nproc)"
+          make install
+
+          mkdir -p /tmp/libtalloc_check/talloc-static-aarch64
+
+          aarch64-linux-gnu-gcc \
+            -c talloc.c \
+            -O2 -fPIC \
+            -D_FILE_OFFSET_BITS=64 -D_GNU_SOURCE -D__STDC_WANT_LIB_EXT1__=1 \
+            -I. -Ilib/replace -Ibin/default \
+            -o /tmp/libtalloc_check/talloc-static-aarch64/talloc.o
+
+          aarch64-linux-gnu-ar rcs \
+            /tmp/libtalloc_check/talloc-install-aarch64/lib/libtalloc.a \
+            /tmp/libtalloc_check/talloc-static-aarch64/talloc.o
+
+          aarch64-linux-gnu-ranlib /tmp/libtalloc_check/talloc-install-aarch64/lib/libtalloc.a
+
+          file /tmp/libtalloc_check/talloc-install-aarch64/lib/libtalloc.a
+          aarch64-linux-gnu-objdump -f /tmp/libtalloc_check/talloc-install-aarch64/lib/libtalloc.a | head -20
+
+      - name: Build proot (ARM64, static talloc only)
+        run: |
+          set -euxo pipefail
+
+          cd src
+          make clean
+
+          make \
+            CC=aarch64-linux-gnu-gcc \
+            LD=aarch64-linux-gnu-gcc \
+            STRIP=aarch64-linux-gnu-strip \
+            OBJCOPY=aarch64-linux-gnu-objcopy \
+            OBJDUMP=aarch64-linux-gnu-objdump \
+            HAS_LOADER_32BIT= \
+            CPPFLAGS='-D_FILE_OFFSET_BITS=64 -D_GNU_SOURCE -I. -I./ -I/tmp/libtalloc_check/talloc-install-aarch64/include' \
+            LDFLAGS='-L/tmp/libtalloc_check/talloc-install-aarch64/lib -Wl,-Bstatic -ltalloc -Wl,-Bdynamic -Wl,-z,noexecstack' \
+            -j"$(nproc)"
+
+      - name: Verify binary and linkage
+        run: |
+          set -euxo pipefail
+
+          file src/proot
+          aarch64-linux-gnu-readelf -h src/proot | grep 'Machine'
+          aarch64-linux-gnu-readelf -d src/proot | grep NEEDED | tee /tmp/proot-needed.txt
+
+          if grep -q 'libtalloc.so' /tmp/proot-needed.txt; then
+            echo "ERROR: libtalloc is still dynamically linked"
+            exit 1
+          fi
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: proot-arm64-static-talloc
+          path: |
+            src/proot
+            /tmp/libtalloc_check/talloc-install-aarch64/lib/libtalloc.a
+            /tmp/proot-needed.txt
