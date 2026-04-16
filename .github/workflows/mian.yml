@@ -112,6 +112,18 @@ jobs:
           file /tmp/libtalloc_check/talloc-install-aarch64/lib/libtalloc.a
           aarch64-linux-gnu-objdump -f /tmp/libtalloc_check/talloc-install-aarch64/lib/libtalloc.a | head -20
 
+      - name: Patch GNUmakefile for CI linker compatibility
+        run: |
+          set -euxo pipefail
+
+          # ubuntu-24.04 runner ld rejects '--rosegment'; drop it in CI only.
+          sed -i 's/,--rosegment//g' src/GNUmakefile
+          grep -n 'LOADER_LDFLAGS\$1' src/GNUmakefile
+          if grep -q -- '--rosegment' src/GNUmakefile; then
+            echo "ERROR: --rosegment still present in src/GNUmakefile"
+            exit 1
+          fi
+
       - name: Build proot (ARM64, static talloc only)
         run: |
           set -euxo pipefail
