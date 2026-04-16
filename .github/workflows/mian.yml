@@ -1,5 +1,5 @@
 ---
-name: ARM64 Build With Static Talloc
+name: ARM64 Build With Static Talloc (Android NDK)
 
 "on":
   workflow_dispatch:
@@ -9,7 +9,7 @@ name: ARM64 Build With Static Talloc
       - ".github/workflows/mian.yml"
 
 jobs:
-  build-arm64-static-talloc:
+  build-arm64-android:
     runs-on: ubuntu-latest
 
     steps:
@@ -19,35 +19,30 @@ jobs:
       - name: Install build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y \
-            make \
-            wget \
-            xz-utils \
-            qemu-user \
-            gcc-aarch64-linux-gnu \
-            binutils-aarch64-linux-gnu
+          sudo apt-get install -y make wget xz-utils qemu-user
 
-      - name: Check dependency readiness
+      - name: Set up Android NDK
+        uses: nttld/setup-ndk@v1
+        id: setup-ndk
+        with:
+          ndk-version: r25c
+
+      - name: Export NDK Variables
         run: |
-          set -euxo pipefail
+          NDK_PATH="${{ steps.setup-ndk.outputs.ndk-path }}"
+          TOOLCHAIN="$NDK_PATH/toolchains/llvm/prebuilt/linux-x86_64"
+          TARGET="aarch64-linux-android28"
+          
+          echo "CC=$TOOLCHAIN/bin/$TARGET-clang" >> $GITHUB_ENV
+          echo "CXX=$TOOLCHAIN/bin/$TARGET-clang++" >> $GITHUB_ENV
+          echo "AR=$TOOLCHAIN/bin/llvm-ar" >> $GITHUB_ENV
+          echo "RANLIB=$TOOLCHAIN/bin/llvm-ranlib" >> $GITHUB_ENV
+          echo "STRIP=$TOOLCHAIN/bin/llvm-strip" >> $GITHUB_ENV
+          echo "OBJCOPY=$TOOLCHAIN/bin/llvm-objcopy" >> $GITHUB_ENV
+          echo "OBJDUMP=$TOOLCHAIN/bin/llvm-objdump" >> $GITHUB_ENV
+          echo "LD=$TOOLCHAIN/bin/$TARGET-clang" >> $GITHUB_ENV
 
-          command -v make
-          command -v wget
-          command -v tar
-          command -v qemu-aarch64
-          command -v aarch64-linux-gnu-gcc
-          command -v aarch64-linux-gnu-ar
-          command -v aarch64-linux-gnu-ranlib
-          command -v aarch64-linux-gnu-objdump
-          command -v aarch64-linux-gnu-readelf
-          command -v file
-
-          aarch64-linux-gnu-gcc --version | head -1
-          qemu-aarch64 --version | head -1
-
-          test -d /usr/aarch64-linux-gnu
-
-      - name: Build ARM64 libtalloc and generate libtalloc.a
+      - name: Build ARM64 Android libtalloc.a
         run: |
           set -euxo pipefail
 
@@ -57,6 +52,7 @@ jobs:
           wget -q -O talloc-2.4.3.tar.gz https://www.samba.org/ftp/talloc/talloc-2.4.3.tar.gz
           tar -xf talloc-2.4.3.tar.gz
 
+          # 为 talloc 提供基于 Android 特性的交叉编译答案
           cat > /tmp/libtalloc_check/talloc_cross_answers.txt <<'EOF'
           Checking uname sysname type: "Linux"
           Checking uname machine type: "aarch64"
@@ -69,7 +65,7 @@ jobs:
           Checking for -D_FILE_OFFSET_BITS=64: NO
           Checking for -D_LARGE_FILES: NO
           Checking getconf large file support flags work: OK
-          Checking correct behavior of strtoll: NO
+          Checking correct behavior of strtoll: OK
           Checking for working strptime: OK
           Checking for C99 vsnprintf: "1"
           Checking for HAVE_SHARED_MMAP: OK
@@ -78,81 +74,49 @@ jobs:
           Checking for HAVE_SECURE_MKSTEMP: OK
           EOF
 
-          cd /tmp/libtalloc_check/talloc-2.4.3
+          cd talloc-2.4.3
 
-          make distclean >/dev/null 2>&1 || true
-
-          CC=aarch64-linux-gnu-gcc AR=aarch64-linux-gnu-ar RANLIB=aarch64-linux-gnu-ranlib \
+          # 强制指定 NDK 编译器和 sysroot
           ./configure \
             --disable-python \
             --cross-compile \
             --cross-answers=/tmp/libtalloc_check/talloc_cross_answers.txt \
-            --cross-execute='qemu-aarch64 -L /usr/aarch64-linux-gnu' \
             --hostcc=gcc \
             --prefix=/tmp/libtalloc_check/talloc-install-aarch64
-
+            
           make -j"$(nproc)"
           make install
 
           mkdir -p /tmp/libtalloc_check/talloc-static-aarch64
 
-          aarch64-linux-gnu-gcc \
+          # 使用 Android NDK 的 Clang 编译静态的 talloc.o
+          $CC \
             -c talloc.c \
             -O2 -fPIC \
             -D_FILE_OFFSET_BITS=64 -D_GNU_SOURCE -D__STDC_WANT_LIB_EXT1__=1 \
             -I. -Ilib/replace -Ibin/default \
             -o /tmp/libtalloc_check/talloc-static-aarch64/talloc.o
 
-          aarch64-linux-gnu-ar rcs \
+          # 打包出纯正的 Android 版 libtalloc.a
+          $AR rcs \
             /tmp/libtalloc_check/talloc-install-aarch64/lib/libtalloc.a \
             /tmp/libtalloc_check/talloc-static-aarch64/talloc.o
 
-          aarch64-linux-gnu-ranlib /tmp/libtalloc_check/talloc-install-aarch64/lib/libtalloc.a
-
-          file /tmp/libtalloc_check/talloc-install-aarch64/lib/libtalloc.a
-          aarch64-linux-gnu-objdump -f /tmp/libtalloc_check/talloc-install-aarch64/lib/libtalloc.a | head -20
+          $RANLIB /tmp/libtalloc_check/talloc-install-aarch64/lib/libtalloc.a
 
       - name: Patch GNUmakefile for CI linker compatibility
         run: |
           set -euxo pipefail
-
-          # ubuntu-24.04 runner ld rejects '--rosegment'; drop it in CI only.
           sed -i 's/,--rosegment//g' src/GNUmakefile
-          grep -n 'LOADER_LDFLAGS\$1' src/GNUmakefile
-          if grep -q -- '--rosegment' src/GNUmakefile; then
-            echo "ERROR: --rosegment still present in src/GNUmakefile"
-            exit 1
-          fi
-
-      - name: Set up Android NDK
-        uses: nttld/setup-ndk@v1
-        id: setup-ndk
-        with:
-          ndk-version: r25c
-
 
       - name: Build proot (Android NDK, pure static)
         run: |
           set -euxo pipefail
-          
-          # 定义 NDK 编译器的绝对路径
-          NDK_PATH="${{ steps.setup-ndk.outputs.ndk-path }}"
-          TOOLCHAIN="$NDK_PATH/toolchains/llvm/prebuilt/linux-x86_64"
-          TARGET="aarch64-linux-android28"
-          
-          export CC="$TOOLCHAIN/bin/$TARGET-clang"
-          export LD="$TOOLCHAIN/bin/$TARGET-clang"
-          export AR="$TOOLCHAIN/bin/llvm-ar"
-          export STRIP="$TOOLCHAIN/bin/llvm-strip"
-          export OBJCOPY="$TOOLCHAIN/bin/llvm-objcopy"
-          export OBJDUMP="$TOOLCHAIN/bin/llvm-objdump"
-          export RANLIB="$TOOLCHAIN/bin/llvm-ranlib"
 
           cd src
           make clean
 
-          # 注意看这里！
-          # 我们把缺失的 ASHMEM_NAME_LEN=256 和 ASHMEM_SET_NAME=0x40047701 强行注入给编译器！
+          # 使用全程统一的 NDK 工具链和针对 Android 的特定宏编译 proot
           make \
             CC="$CC" \
             LD="$LD" \
@@ -165,14 +129,12 @@ jobs:
             LDFLAGS='-static -L/tmp/libtalloc_check/talloc-install-aarch64/lib -Wl,-Bstatic -ltalloc' \
             -j"$(nproc)"
 
-        
-
       - name: Verify binary and linkage
         run: |
           set -euxo pipefail
-
           file src/proot
-          # 使用 NDK 的 readelf 检查
+          
+          # 验证是否还存在不需要的动态链接库 (纯静态版输出应为空)
           "${{ steps.setup-ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-readelf" -d src/proot | grep NEEDED || echo "Fully static! No NEEDED libraries."
 
       - name: Upload artifacts
