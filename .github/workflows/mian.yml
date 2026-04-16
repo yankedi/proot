@@ -109,14 +109,16 @@ jobs:
           set -euxo pipefail
           sed -i 's/,--rosegment//g' src/GNUmakefile
 
-      - name: Build proot (Android NDK, pure static)
+      - name: Build proot (Android NDK, Mixed Linking)
         run: |
           set -euxo pipefail
 
           cd src
           make clean
 
-          # 使用全程统一的 NDK 工具链和针对 Android 的特定宏编译 proot
+          # 注意 LDFLAGS 的变化：
+          # 去掉了全局的 -static
+          # 恢复使用 -Wl,-Bstatic -ltalloc -Wl,-Bdynamic 只静态链接 talloc
           make \
             CC="$CC" \
             LD="$LD" \
@@ -126,7 +128,7 @@ jobs:
             OBJDUMP="$OBJDUMP" \
             HAS_LOADER_32BIT= \
             CPPFLAGS='-D__ANDROID__ -DASHMEM_NAME_LEN=256 -DASHMEM_SET_NAME=0x40047701 -Wno-deprecated-declarations -D_FILE_OFFSET_BITS=64 -D_GNU_SOURCE -I. -I./ -I/tmp/libtalloc_check/talloc-install-aarch64/include' \
-            LDFLAGS='-static -L/tmp/libtalloc_check/talloc-install-aarch64/lib -Wl,-Bstatic -ltalloc' \
+            LDFLAGS='-L/tmp/libtalloc_check/talloc-install-aarch64/lib -Wl,-Bstatic -ltalloc -Wl,-Bdynamic -Wl,-z,noexecstack' \
             -j"$(nproc)"
 
       - name: Verify binary and linkage
