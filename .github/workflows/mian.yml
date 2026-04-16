@@ -1,4 +1,3 @@
----
 name: ARM64 Build With Static Talloc (Android NDK)
 
 "on":
@@ -52,7 +51,6 @@ jobs:
           wget -q -O talloc-2.4.3.tar.gz https://www.samba.org/ftp/talloc/talloc-2.4.3.tar.gz
           tar -xf talloc-2.4.3.tar.gz
 
-          # 为 talloc 提供基于 Android 特性的交叉编译答案
           cat > /tmp/libtalloc_check/talloc_cross_answers.txt <<'EOF'
           Checking uname sysname type: "Linux"
           Checking uname machine type: "aarch64"
@@ -76,7 +74,6 @@ jobs:
 
           cd talloc-2.4.3
 
-          # 强制指定 NDK 编译器和 sysroot
           ./configure \
             --disable-python \
             --cross-compile \
@@ -89,7 +86,6 @@ jobs:
 
           mkdir -p /tmp/libtalloc_check/talloc-static-aarch64
 
-          # 使用 Android NDK 的 Clang 编译静态的 talloc.o
           $CC \
             -c talloc.c \
             -O2 -fPIC \
@@ -97,7 +93,6 @@ jobs:
             -I. -Ilib/replace -Ibin/default \
             -o /tmp/libtalloc_check/talloc-static-aarch64/talloc.o
 
-          # 打包出纯正的 Android 版 libtalloc.a
           $AR rcs \
             /tmp/libtalloc_check/talloc-install-aarch64/lib/libtalloc.a \
             /tmp/libtalloc_check/talloc-static-aarch64/talloc.o
@@ -109,16 +104,13 @@ jobs:
           set -euxo pipefail
           sed -i 's/,--rosegment//g' src/GNUmakefile
 
-      - name: Build proot (Android NDK, Mixed Linking)
+      - name: Build proot and proot-loader (Android NDK, Mixed Linking)
         run: |
           set -euxo pipefail
 
           cd src
           make clean
 
-          # 注意 LDFLAGS 的变化：
-          # 去掉了全局的 -static
-          # 恢复使用 -Wl,-Bstatic -ltalloc -Wl,-Bdynamic 只静态链接 talloc
           make \
             CC="$CC" \
             LD="$LD" \
@@ -131,16 +123,29 @@ jobs:
             LDFLAGS='-L/tmp/libtalloc_check/talloc-install-aarch64/lib -Wl,-Bstatic -ltalloc -Wl,-Bdynamic -Wl,-z,noexecstack' \
             -j"$(nproc)"
 
+          # loader 是 proot 用来在 Android 高版本绕过 execve 拦截的关键组件
+          # make 完成后它在 loader/loader，需要重命名为 proot-loader 方便使用
+          cp loader/loader proot-loader
+          echo "--- proot binary ---"
+          file proot
+          echo "--- proot-loader binary ---"
+          file proot-loader
+
       - name: Verify binary and linkage
         run: |
           set -euxo pipefail
-          file src/proot
-          
-          # 验证是否还存在不需要的动态链接库 (纯静态版输出应为空)
-          "${{ steps.setup-ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-readelf" -d src/proot | grep NEEDED || echo "Fully static! No NEEDED libraries."
+          READELF="${{ steps.setup-ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-readelf"
+
+          echo "=== proot NEEDED ==="
+          "$READELF" -d src/proot | grep NEEDED || echo "No dynamic deps!"
+
+          echo "=== proot-loader NEEDED ==="
+          "$READELF" -d src/proot-loader | grep NEEDED || echo "No dynamic deps!"
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: proot-android-aarch64-static
-          path: src/proot
+          name: proot-android-aarch64
+          path: |
+            src/proot
+            src/proot-loader
